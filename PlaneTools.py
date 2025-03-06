@@ -111,7 +111,7 @@ class CropImages(Operator):
                 continue
             
             #Get image bounds
-            Bounds = GetImageBounds(image_node.image)
+            Bounds = get_image_alpha_bounds(image_node.image)
             if not Bounds:
                 continue
 
