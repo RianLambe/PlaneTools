@@ -1,3 +1,4 @@
+#Blender plugin info
 bl_info = {
     "name": "Plane Tools",
     "author": "Rian Lambe",
@@ -8,6 +9,7 @@ bl_info = {
     "category": "Object",
 }
 
+#Imports 
 import bpy
 import math
 import numpy as np
@@ -16,43 +18,10 @@ from bpy.props import FloatProperty, EnumProperty, IntProperty
 import mathutils
 import bmesh
 
-def get_image_alpha_bounds(image):
-    """Get the bounds of non-zero alpha pixels in the image."""
-    if not image or not image.pixels:
-        return None
-    
-    # Convert image pixels to numpy array
-    pixels = np.array(image.pixels[:])
-    width = image.size[0]
-    height = image.size[1]
-    
-    # Reshape array to separate RGBA channels
-    pixels = pixels.reshape(height, width, 4)
-    
-    # Get alpha channel
-    alpha = pixels[:, :, 3]
-    
-    # Find rows and columns with non-zero alpha
-    rows = np.any(alpha > 0, axis=1)
-    cols = np.any(alpha > 0, axis=0)
-    
-    if not np.any(rows) or not np.any(cols):
-        return None
-    
-    # Get bounds
-    min_row, max_row = np.where(rows)[0][[0, -1]]
-    min_col, max_col = np.where(cols)[0][[0, -1]]
-    
-    # Convert to UV coordinates (0 to 1)
-    return {
-        'min_u': min_col / width,
-        'max_u': (max_col + 1) / width,
-        'min_v': min_row / height,
-        'max_v': (max_row + 1) / height
-    }
+#Crop selected planes to their alpha bounds
+class CropImages(Operator):
 
-class OBJECT_OT_crop_planes_to_alpha(Operator):
-    """Crop selected planes to their alpha bounds"""
+    #Panel registration properties
     bl_idname = "object.crop_planes_to_alpha"
     bl_label = "Crop Images"
     bl_options = {'REGISTER', 'UNDO'}
@@ -65,6 +34,7 @@ class OBJECT_OT_crop_planes_to_alpha(Operator):
         max=100.0
     )
 
+    #Checks if objects are selected
     @classmethod
     def poll(cls, context):
         return any(obj for obj in context.selected_objects if (
@@ -73,61 +43,99 @@ class OBJECT_OT_crop_planes_to_alpha(Operator):
             len(obj.data.materials) > 0 and
             obj.data.materials[0].node_tree and
             obj.data.materials[0].node_tree.nodes.get('Image Texture')
-        ))
+        )
+    )
+
+    #Calculates the bounds of the image based on the alpha
+    def GetImageBounds(Image):
+    
+        #Check valid image passed
+        if not Image or not Image.pixels:
+            return None
+        
+        # Convert image pixels to numpy array
+        Pixels = np.array(Image.pixels[:])
+        Width = Image.size[0]
+        Height = Image.size[1]
+        
+        # Reshape array to separate RGBA channels
+        Pixels = Pixels.reshape(Height, Width, 4)
+        
+        # Get alpha channel
+        Alpha = Pixels[:, :, 3]
+        
+        # Find rows and columns with non-zero alpha
+        Rows = np.any(Alpha > 0, axis=1)
+        Cols = np.any(Alpha > 0, axis=0)
+        
+        if not np.any(Rows) or not np.any(Cols):
+            return None
+        
+        # Get bounds
+        MinRow, MaxRow = np.where(Rows)[0][[0, -1]]
+        MinCol, MaxCol = np.where(Cols)[0][[0, -1]]
+        
+        # Convert to UV coordinates (0 to 1)
+        return {
+            'min_u': MinCol / Width,
+            'max_u': (MaxCol + 1) / Width,
+            'min_v': MinRow / Height,
+            'max_v': (MaxRow + 1) / Height
+        }
 
     def execute(self, context):
-        # Ensure we're in object mode
+        #Check in object mode
         if context.active_object and context.active_object.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
 
-        # Store initial state
+        #Store initial state
         original_active = context.active_object
         original_selection = context.selected_objects[:]
         original_cursor = context.scene.cursor.location.copy()
         
-        # First pass: Process all geometry
-        for obj in original_selection:
-            if not (obj.type == 'MESH' and 
-                   obj.data.uv_layers and 
-                   len(obj.data.materials) > 0 and
-                   obj.data.materials[0].node_tree and
-                   obj.data.materials[0].node_tree.nodes.get('Image Texture')):
+        #Process all geometry
+        for Obj in original_selection:
+            if not (Obj.type == 'MESH' and 
+                   Obj.data.uv_layers and 
+                   len(Obj.data.materials) > 0 and
+                   Obj.data.materials[0].node_tree and
+                   Obj.data.materials[0].node_tree.nodes.get('Image Texture')):
                 continue
 
-            mesh = obj.data
-            material = obj.data.materials[0]
+            mesh = Obj.data
+            material = Obj.data.materials[0]
             nodes = material.node_tree.nodes
             image_node = nodes.get('Image Texture')
             
             if not image_node or not image_node.image:
                 continue
             
-            # Get image bounds
-            bounds = get_image_alpha_bounds(image_node.image)
-            if not bounds:
+            #Get image bounds
+            Bounds = GetImageBounds(image_node.image)
+            if not Bounds:
                 continue
 
-            # Check if already cropped
-            current_uv_bounds = {
+            #Check if already cropped
+            CurrentUVBounds = {
                 'min_u': min(uv.uv.x for uv in mesh.uv_layers.active.data),
                 'max_u': max(uv.uv.x for uv in mesh.uv_layers.active.data),
                 'min_v': min(uv.uv.y for uv in mesh.uv_layers.active.data),
                 'max_v': max(uv.uv.y for uv in mesh.uv_layers.active.data)
             }
             
-            margin = 0.01
-            if (abs(current_uv_bounds['min_u'] - bounds['min_u']) < margin and
-                abs(current_uv_bounds['max_u'] - bounds['max_u']) < margin and
-                abs(current_uv_bounds['min_v'] - bounds['min_v']) < margin and
-                abs(current_uv_bounds['max_v'] - bounds['max_v']) < margin):
+            Margin = 0.01
+            if (abs(CurrentUVBounds['min_u'] - Bounds['min_u']) < Margin and
+                abs(CurrentUVBounds['max_u'] - Bounds['max_u']) < Margin and
+                abs(CurrentUVBounds['min_v'] - Bounds['min_v']) < Margin and
+                abs(CurrentUVBounds['max_v'] - Bounds['max_v']) < Margin):
                 continue
 
-            # Apply padding
-            padding = self.padding / 100
-            bounds['min_u'] = max(0.0, bounds['min_u'] - padding)
-            bounds['max_u'] = min(1.0, bounds['max_u'] + padding)
-            bounds['min_v'] = max(0.0, bounds['min_v'] - padding)
-            bounds['max_v'] = min(1.0, bounds['max_v'] + padding)
+            #Apply padding
+            Padding = self.padding / 100
+            Bounds['min_u'] = max(0.0, Bounds['min_u'] - Padding)
+            Bounds['max_u'] = min(1.0, Bounds['max_u'] + Padding)
+            Bounds['min_v'] = max(0.0, Bounds['min_v'] - Padding)
+            Bounds['max_v'] = min(1.0, Bounds['max_v'] + Padding)
             
             # Store original vertex positions and get bounds
             original_verts = [(vert.co.copy()) for vert in mesh.vertices]
@@ -137,10 +145,10 @@ class OBJECT_OT_crop_planes_to_alpha(Operator):
             min_y, max_y = min(y_coords), max(y_coords)
             
             # Calculate UV dimensions
-            uv_width = bounds['max_u'] - bounds['min_u']
-            uv_height = bounds['max_v'] - bounds['min_v']
-            uv_center_x = (bounds['min_u'] + bounds['max_u']) / 2
-            uv_center_y = (bounds['min_v'] + bounds['max_v']) / 2
+            uv_width = Bounds['max_u'] - Bounds['min_u']
+            uv_height = Bounds['max_v'] - Bounds['min_v']
+            uv_center_x = (Bounds['min_u'] + Bounds['max_u']) / 2
+            uv_center_y = (Bounds['min_v'] + Bounds['max_v']) / 2
             
             # Calculate scale factors
             original_width = max_x - min_x
@@ -168,8 +176,8 @@ class OBJECT_OT_crop_planes_to_alpha(Operator):
                 rel_y = (vert.co.y - min_y) / (max_y - min_y)
                 
                 # Map to new UV coordinates
-                uv_layer.data[loop_idx].uv.x = bounds['min_u'] + (rel_x * uv_width)
-                uv_layer.data[loop_idx].uv.y = bounds['min_v'] + (rel_y * uv_height)
+                uv_layer.data[loop_idx].uv.x = Bounds['min_u'] + (rel_x * uv_width)
+                uv_layer.data[loop_idx].uv.y = Bounds['min_v'] + (rel_y * uv_height)
             
             # Update vertices while maintaining position and scale
             for vert_idx, vertex in enumerate(mesh.vertices):
@@ -181,18 +189,18 @@ class OBJECT_OT_crop_planes_to_alpha(Operator):
             mesh.update()
         
         # Second pass: Set origins
-        for obj in original_selection:
-            if not obj.type == 'MESH':
+        for Obj in original_selection:
+            if not Obj.type == 'MESH':
                 continue
                 
             bpy.ops.object.select_all(action='DESELECT')
-            obj.select_set(True)
-            context.view_layer.objects.active = obj
+            Obj.select_set(True)
+            context.view_layer.objects.active = Obj
             
-            mesh = obj.data
+            mesh = Obj.data
             
             # Calculate bounds in world space
-            world_matrix = obj.matrix_world
+            world_matrix = Obj.matrix_world
             verts_world = [world_matrix @ v.co for v in mesh.vertices]
             min_x = min(v.x for v in verts_world)
             max_x = max(v.x for v in verts_world)
@@ -206,9 +214,9 @@ class OBJECT_OT_crop_planes_to_alpha(Operator):
             
             # Set origin based on stretch axis
             if context.scene.stretch_axis == 'X':
-                cursor_pos = mathutils.Vector((min_x, center_y, obj.location.z))
+                cursor_pos = mathutils.Vector((min_x, center_y, Obj.location.z))
             elif context.scene.stretch_axis == 'Y':
-                cursor_pos = mathutils.Vector((center_x, min_y, obj.location.z))
+                cursor_pos = mathutils.Vector((center_x, min_y, Obj.location.z))
             else:  # Z axis
                 cursor_pos = mathutils.Vector((center_x, center_y, min_z))
             
@@ -216,19 +224,21 @@ class OBJECT_OT_crop_planes_to_alpha(Operator):
             bpy.ops.object.origin_set(type='ORIGIN_CURSOR')
             
             mesh.update()
-            obj.update_tag()
+            Obj.update_tag()
 
         # Restore original state
         context.scene.cursor.location = original_cursor
         bpy.ops.object.select_all(action='DESELECT')
-        for obj in original_selection:
-            obj.select_set(True)
+        for Obj in original_selection:
+            Obj.select_set(True)
         context.view_layer.objects.active = original_active
         
         return {'FINISHED'}
 
-class OBJECT_OT_rotate_and_scale_plane(Operator):
-    """Rotate selected objects and adjust dimension"""
+#Rotate selected objects and adjust scale
+class RotateAndScale(Operator):
+    
+    #Panel registration properties
     bl_idname = "object.rotate_and_scale_plane"
     bl_label = "Rotate and Scale"
     bl_options = {'REGISTER', 'UNDO'}
@@ -279,45 +289,10 @@ class OBJECT_OT_rotate_and_scale_plane(Operator):
             
         return {'FINISHED'}
 
-class VIEW3D_PT_plane_adjustment_panel(Panel):
-
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = 'Plane tools'
-    bl_label = "Plane tools"
-
-    def draw(self, context):
-        layout = self.layout
-        
-        layout.label(text="Settings:")
-        box = layout.box()
-        box.prop(context.scene, "rotation_axis", text="Rotation Axis")
-        box.prop(context.scene, "stretch_axis", text="Stretch Axis")
-        box.prop(context.scene, "rotation_angle", text="Rotation Angle")
-        box.prop(context.scene, "pixels_per_meter", text="Pixels per meter")
-
-        layout.label(text="Operations:")
-        box = layout.box()
-        box.operator("object.crop_planes_to_alpha")
-        box.operator("object.rotate_and_scale_plane")
-
-        # Height adjustment section
-        box.separator()
-        box.label(text="Adjust Height:")
-        grid = box.grid_flow(row_major=True, columns=2, align=True)
-        grid.operator("object.adjust_height", text="-1").adjustment = -1
-        grid.operator("object.adjust_height", text="+1").adjustment = 1
-        grid.operator("object.adjust_height", text="-10").adjustment = -10
-        grid.operator("object.adjust_height", text="+10").adjustment = 10
-
-        # Stairs section
-        box.separator()
-        box.label(text="Stairs:")
-        box.prop(context.scene, "num_steps", text="Number of steps")
-        box.operator("object.create_stairs")
-
-class OBJECT_OT_adjust_height(Operator):
-    """Adjust object height"""
+#Adjust heigt based on pixels per meter and angle
+class AdjustHeight(Operator):
+    
+    #Panel registration properties
     bl_idname = "object.adjust_height"
     bl_label = "Adjust Height"
     bl_options = {'REGISTER', 'UNDO'}
@@ -329,17 +304,18 @@ class OBJECT_OT_adjust_height(Operator):
     )
     
     def execute(self, context):
-        # Convert pixel adjustment to meters based on pixels_per_meter setting
-        pixels_per_meter = context.scene.pixels_per_meter
-        meter_adjustment = self.adjustment / pixels_per_meter
+        # Convert pixel adjustment to meters based on PixelsPerMeter setting
+        PixelsPerMeter = context.scene.pixels_per_meter
+        MeterAdjustment = self.adjustment / PixelsPerMeter
         
         for obj in context.selected_objects:
             if obj.type == 'MESH':
                 # Move the object up or down
-                obj.location.z += meter_adjustment
+                obj.location.z += MeterAdjustment
         return {'FINISHED'}
 
-class OBJECT_OT_create_stairs(Operator):
+#Generates stairs 
+class CreateStairs(Operator):
     """Create stairs by adding loop cuts"""
     bl_idname = "object.create_stairs"
     bl_label = "Create Stairs"
@@ -404,6 +380,47 @@ class OBJECT_OT_create_stairs(Operator):
             
         return {'FINISHED'}
 
+#Create blender window
+class RenderPlaneToolsPanel(Panel):
+
+    #Panel registration properties
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Plane tools'
+    bl_label = "Plane tools"
+
+    #Draw window in 3D view sidebar
+    def draw(self, context):
+        layout = self.layout
+        
+        layout.label(text="Settings:")
+        box = layout.box()
+        box.prop(context.scene, "rotation_axis", text="Rotation Axis")
+        box.prop(context.scene, "stretch_axis", text="Stretch Axis")
+        box.prop(context.scene, "rotation_angle", text="Rotation Angle")
+        box.prop(context.scene, "pixels_per_meter", text="Pixels per meter")
+
+        layout.label(text="Operations:")
+        box = layout.box()
+        box.operator("object.crop_planes_to_alpha")
+        box.operator("object.rotate_and_scale_plane")
+
+        # Height adjustment section
+        box.separator()
+        box.label(text="Adjust Height:")
+        grid = box.grid_flow(row_major=True, columns=2, align=True)
+        grid.operator("object.adjust_height", text="-1").adjustment = -1
+        grid.operator("object.adjust_height", text="+1").adjustment = 1
+        grid.operator("object.adjust_height", text="-10").adjustment = -10
+        grid.operator("object.adjust_height", text="+10").adjustment = 10
+
+        # Stairs section
+        box.separator()
+        box.label(text="Stairs:")
+        box.prop(context.scene, "num_steps", text="Number of steps")
+        box.operator("object.create_stairs")
+
+#Adds custom properties to Blender's Scene type and registers classes
 def register():
     bpy.types.Scene.rotation_angle = FloatProperty(
         name="Rotation Angle",
@@ -451,25 +468,27 @@ def register():
         max=100
     )
     
-    bpy.utils.register_class(OBJECT_OT_crop_planes_to_alpha)
-    bpy.utils.register_class(OBJECT_OT_rotate_and_scale_plane)
-    bpy.utils.register_class(VIEW3D_PT_plane_adjustment_panel)
-    bpy.utils.register_class(OBJECT_OT_adjust_height)
-    bpy.utils.register_class(OBJECT_OT_create_stairs)
+    bpy.utils.register_class(CropImages)
+    bpy.utils.register_class(RotateAndScale)
+    bpy.utils.register_class(RenderPlaneToolsPanel)
+    bpy.utils.register_class(AdjustHeight)
+    bpy.utils.register_class(CreateStairs)
 
+#Removes custom properties and unregisters classes when disabling the add-on
 def unregister():
     del bpy.types.Scene.rotation_angle
     del bpy.types.Scene.rotation_axis
     del bpy.types.Scene.stretch_axis
     
-    bpy.utils.unregister_class(VIEW3D_PT_plane_adjustment_panel)
-    bpy.utils.unregister_class(OBJECT_OT_rotate_and_scale_plane)
-    bpy.utils.unregister_class(OBJECT_OT_crop_planes_to_alpha)
+    bpy.utils.unregister_class(RenderPlaneToolsPanel)
+    bpy.utils.unregister_class(RotateAndScale)
+    bpy.utils.unregister_class(CropImages)
     del bpy.types.Scene.pixels_per_meter
     del bpy.types.Scene.num_steps
-    bpy.utils.unregister_class(OBJECT_OT_adjust_height)
-    bpy.utils.unregister_class(OBJECT_OT_create_stairs)
+    bpy.utils.unregister_class(AdjustHeight)
+    bpy.utils.unregister_class(CreateStairs)
 
+#Setup main 
 if __name__ == "__main__":
     try:
         unregister()
