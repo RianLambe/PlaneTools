@@ -9,7 +9,7 @@ bl_info = {
     "category": "Object",
 }
 
-#Imports 
+#Imports
 import bpy
 import math
 import numpy as np
@@ -136,61 +136,98 @@ class ToggleMask(Operator):
             self.report({'ERROR'}, "No shader node found in material")
             return {'CANCELLED'}
         
-        if not context.scene.show_mask:
-            # Hide mask - store the current node setup
-            # First check if we have an original texture stored as a custom property
-            if "original_texture" in target_obj:
-                # Get the texture name from the custom property
-                tex_name = target_obj["original_texture"]
-                if tex_name in bpy.data.images:
-                    # Create a texture node for the original texture
-                    texture_node = nodes.new('ShaderNodeTexImage')
-                    texture_node.name = 'Original Texture'
-                    texture_node.image = bpy.data.images[tex_name]
-                    texture_node.location = (-300, 300)
-                    
-                    # Disconnect mask from Base Color
-                    for link in list(links):
-                        if (link.from_node == mask_node and 
-                            link.to_node == shader_node and
-                            link.to_socket.name == 'Base Color'):
-                            links.remove(link)
-                    
-                    # Connect original texture to Base Color
-                    links.new(texture_node.outputs['Color'], shader_node.inputs['Base Color'])
-                    
-                    self.report({'INFO'}, f"Restored original texture: {tex_name}")
-                else:
-                    self.report({'WARNING'}, f"Original texture {tex_name} not found")
-            else:
-                # Just disconnect the mask
-                for link in list(links):
-                    if (link.from_node == mask_node and 
-                        link.to_node == shader_node and
-                        link.to_socket.name == 'Base Color'):
-                        links.remove(link)
-                
-                self.report({'INFO'}, "Mask hidden but no original texture found")
-        else:
-            # Show mask - first save current texture if connected
+        if context.scene.show_mask:
+            # SHOWING MASK - Save current texture connections first
             color_input = shader_node.inputs['Base Color']
             
             # Store the current texture if it's linked
             if color_input.is_linked:
                 color_source = color_input.links[0].from_node
-                if color_source.type == 'TEX_IMAGE' and color_source.image:
-                    # Save the current texture name as a custom property
-                    target_obj["original_texture"] = color_source.image.name
-                    self.report({'INFO'}, f"Saved original texture: {color_source.image.name}")
                 
-                # Disconnect current texture
-                for link in list(color_input.links):
-                    links.remove(link)
+                # Only save if it's a texture node different from the mask
+                if (color_source.type == 'TEX_IMAGE' and 
+                    color_source != mask_node and 
+                    color_source.image):
+                    
+                    # Store the node name for later use
+                    target_obj["original_texture_node"] = color_source.name
+                    
+                    # If the source is a texture node, save its image name
+                    if color_source.image:
+                        target_obj["original_texture"] = color_source.image.name
+                        self.report({'INFO'}, f"Saved original texture: {color_source.image.name}")
+                    
+                    # Rename the node to make it easy to find later
+                    color_source.name = "Original Texture"
+                    
+                    # Disconnect but don't delete it
+                    for link in list(color_input.links):
+                        links.remove(link)
             
             # Connect mask to Base Color
             links.new(mask_node.outputs['Color'], shader_node.inputs['Base Color'])
-            self.report({'INFO'}, "Mask shown")
-        
+            self.report({'INFO'}, "Showing mask")
+            
+        else:
+            # HIDING MASK - Restore original texture
+            # First disconnect mask if connected
+            color_input = shader_node.inputs['Base Color']
+            for link in list(color_input.links):
+                links.remove(link)
+                
+            # Try to find original texture node by name
+            original_node = None
+            for node in nodes:
+                if node.name == "Original Texture":
+                    original_node = node
+                    break
+                    
+            # If we can't find it by name but have saved its name, try that
+            if not original_node and "original_texture_node" in target_obj:
+                node_name = target_obj["original_texture_node"]
+                for node in nodes:
+                    if node.name == node_name:
+                        original_node = node
+                        break
+            
+            # If we found the original node, reconnect it
+            if original_node and original_node.type == 'TEX_IMAGE':
+                # If the node exists but lost its image, try to restore it
+                if not original_node.image and "original_texture" in target_obj:
+                    tex_name = target_obj["original_texture"]
+                    if tex_name in bpy.data.images:
+                        original_node.image = bpy.data.images[tex_name]
+                
+                # Now reconnect it
+                links.new(original_node.outputs['Color'], shader_node.inputs['Base Color'])
+                self.report({'INFO'}, "Restored original texture")
+            
+            # If we can't find the original node but have the texture name, create a new node
+            elif "original_texture" in target_obj:
+                tex_name = target_obj["original_texture"]
+                if tex_name in bpy.data.images:
+                    tex_node = nodes.new('ShaderNodeTexImage')
+                    tex_node.name = "Original Texture"
+                    tex_node.location = (-300, 300)
+                    tex_node.image = bpy.data.images[tex_name]
+                    
+                    # Add UV map node for the new texture
+                    uv_node = None
+                    for node in nodes:
+                        if node.type == 'UVMAP':
+                            uv_node = node
+                            break
+                            
+                    if uv_node:
+                        links.new(uv_node.outputs['UV'], tex_node.inputs['Vector'])
+                    
+                    links.new(tex_node.outputs['Color'], shader_node.inputs['Base Color'])
+                    self.report({'INFO'}, f"Recreated original texture: {tex_name}")
+                else:
+                    self.report({'WARNING'}, f"Original texture {tex_name} not found")
+            else:
+                self.report({'WARNING'}, "No original texture found to restore")
+                
         return {'FINISHED'}
     
     
@@ -235,7 +272,6 @@ class BrowseImageDirectory(Operator):
         # The actual browsing is done via the UI's file browser
         return {'FINISHED'}
         
-# Operator to create a mask texture
 class CreateMask(Operator):
     bl_idname = "object.create_mask"
     bl_label = "Create Mask"
@@ -262,7 +298,7 @@ class CreateMask(Operator):
             
         target_obj = generator.target_object
         
-        # Create a new mask texture with a visible checkerboard pattern for testing
+        # Create a new mask texture with a completely black image
         texture_name = f"Mask_{generator.name}"
         
         # Check if the texture already exists
@@ -277,18 +313,12 @@ class CreateMask(Operator):
                 alpha=True
             )
             
-            # Create a checkerboard pattern for testing
+            # Create all black pixels (instead of the checkerboard pattern)
             pixels = []
             for y in range(1024):
                 for x in range(1024):
-                    # Create a large checkerboard pattern (8x8 squares)
-                    checker_x = (x // 128) % 2
-                    checker_y = (y // 128) % 2
-                    
-                    if (checker_x == 0 and checker_y == 0) or (checker_x == 1 and checker_y == 1):
-                        pixels.extend([1.0, 1.0, 1.0, 1.0])  # White square
-                    else:
-                        pixels.extend([0.0, 0.0, 0.0, 1.0])  # Black square
+                    # All black pixels with full alpha
+                    pixels.extend([0.0, 0.0, 0.0, 1.0])
             
             mask_texture.pixels = pixels
             mask_texture.update()
@@ -305,42 +335,51 @@ class CreateMask(Operator):
             mat = target_obj.data.materials[0]
             if not mat.use_nodes:
                 mat.use_nodes = True
-        
-        # Set up nodes for the mask texture
+                
+        # Find the Image Texture node or create one if it doesn't exist
         nodes = mat.node_tree.nodes
         links = mat.node_tree.links
         
-        # Clear existing nodes
+        image_node = None
         for node in nodes:
-            nodes.remove(node)
+            if node.type == 'TEX_IMAGE':
+                image_node = node
+                
+                # Save the original texture if this is our first time
+                if image_node.image and not hasattr(target_obj, '["original_texture"]'):
+                    target_obj["original_texture"] = image_node.image.name
+                    self.report({'INFO'}, f"Saved original texture: {image_node.image.name}")
+                break
+                
+        # If no image texture node exists, create one
+        if not image_node:
+            image_node = nodes.new('ShaderNodeTexImage')
+            image_node.location = (-300, 0)
+            
+            # Try to connect it to a shader node
+            shader_node = None
+            for node in nodes:
+                if node.type == 'BSDF_PRINCIPLED':
+                    shader_node = node
+                    break
+                    
+            if shader_node:
+                links.new(image_node.outputs['Color'], shader_node.inputs['Base Color'])
         
-        # Add principled BSDF node
-        bsdf_node = nodes.new('ShaderNodeBsdfPrincipled')
-        bsdf_node.location = (0, 0)
+        # Set the mask image to the image node
+        image_node.image = mask_texture
         
-        # Add output node
-        output_node = nodes.new('ShaderNodeOutputMaterial')
-        output_node.location = (300, 0)
+        # Set interpolation to Closest (no interpolation) if available on the node
+        if hasattr(image_node, 'interpolation'):
+            image_node.interpolation = 'Closest'
         
-        # Add mask texture node with explicit UV mapping
-        mask_node = nodes.new('ShaderNodeTexImage')
-        mask_node.name = 'Mask Texture'
-        mask_node.location = (-300, 0)
-        mask_node.image = mask_texture
-        
-        # Add UV map node explicitly
-        uv_node = nodes.new('ShaderNodeUVMap')
-        uv_node.location = (-500, -100)
-        
-        # Connect nodes
-        links.new(uv_node.outputs['UV'], mask_node.inputs['Vector'])
-        links.new(mask_node.outputs['Color'], bsdf_node.inputs['Base Color'])
-        links.new(bsdf_node.outputs['BSDF'], output_node.inputs['Surface'])
+        # Set the initial state to show mask
+        context.scene.show_mask = True
         
         # Open the image editor with the mask
         self.open_image_editor(context, mask_texture)
         
-        self.report({'INFO'}, f"Created mask texture: {texture_name} with checkerboard pattern")
+        self.report({'INFO'}, f"Created mask texture: {texture_name} with black mask")
         self.report({'INFO'}, f"You can now edit the mask in the Image Editor")
         
         return {'FINISHED'}
@@ -357,7 +396,84 @@ class CreateMask(Operator):
         if image_editor:
             image_editor.spaces.active.image = image
 
-# Operator to place selected images from a generator
+
+class ToggleMask(Operator):
+    bl_idname = "object.toggle_mask"
+    bl_label = "Toggle Mask"
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    index: IntProperty(
+        name="Index",
+        description="Index of the generator to toggle mask for",
+        default=0,
+        min=0
+    )
+    
+    def execute(self, context):
+        if self.index >= len(context.scene.generators):
+            self.report({'ERROR'}, "Invalid generator index")
+            return {'CANCELLED'}
+            
+        generator = context.scene.generators[self.index]
+        
+        # Check if target and mask exist
+        if not generator.target_object:
+            self.report({'ERROR'}, "No target object selected")
+            return {'CANCELLED'}
+            
+        if not generator.mask_texture or generator.mask_texture not in bpy.data.images:
+            self.report({'ERROR'}, "Mask texture not found. Create a mask first.")
+            return {'CANCELLED'}
+            
+        target_obj = generator.target_object
+        mask_img = bpy.data.images[generator.mask_texture]
+        
+        # Toggle the visibility state
+        current_state = context.scene.show_mask
+        context.scene.show_mask = not current_state
+        
+        # Get material
+        if not target_obj.data.materials or len(target_obj.data.materials) == 0:
+            self.report({'ERROR'}, "Target object has no materials")
+            return {'CANCELLED'}
+            
+        mat = target_obj.data.materials[0]
+        if not mat.use_nodes:
+            self.report({'ERROR'}, "Material does not use nodes")
+            return {'CANCELLED'}
+            
+        # Find the Image Texture node
+        nodes = mat.node_tree.nodes
+        
+        image_node = None
+        for node in nodes:
+            if node.type == 'TEX_IMAGE':
+                image_node = node
+                break
+                
+        if not image_node:
+            self.report({'ERROR'}, "No image texture node found in material")
+            return {'CANCELLED'}
+        
+        # Simply swap the texture based on the toggle state
+        if context.scene.show_mask:
+            # Show mask - set the mask texture
+            image_node.image = mask_img
+            self.report({'INFO'}, "Showing mask texture")
+        else:
+            # Hide mask - restore original texture if we have it
+            if "original_texture" in target_obj:
+                tex_name = target_obj["original_texture"]
+                if tex_name in bpy.data.images:
+                    image_node.image = bpy.data.images[tex_name]
+                    self.report({'INFO'}, f"Restored original texture: {tex_name}")
+                else:
+                    self.report({'WARNING'}, f"Original texture {tex_name} not found")
+            else:
+                self.report({'WARNING'}, "No original texture found to restore")
+        
+        return {'FINISHED'}
+
 class PlaceImages(Operator):
     bl_idname = "object.place_images"
     bl_label = "Place Images"
@@ -436,7 +552,7 @@ class PlaceImages(Operator):
             self.report({'WARNING'}, "No image files found in directory")
             return {'CANCELLED'}
         
-        # Load all images first
+        # Load all images first (without setting interpolation on images)
         images = []
         for img_file in image_files:
             img_path = os.path.join(directory, img_file)
@@ -469,12 +585,25 @@ class PlaceImages(Operator):
         target_dim_y = target_obj.dimensions.y
         target_area = target_dim_x * target_dim_y
         
-        # Calculate grid size based on density
-        num_points = int(target_area * self.placement_density * 4)
-        grid_size = max(int(math.sqrt(num_points)), 20)
+        # Get pixels per meter setting
+        pixels_per_meter = context.scene.pixels_per_meter
+        
+        # Calculate grid size based on density and pixels per meter
+        # This ensures the grid aligns with the texture resolution
+        grid_cell_size = 1.0 / pixels_per_meter  # Size of one grid cell in meters
+        grid_cells_x = max(int(target_dim_x / grid_cell_size), 1)
+        grid_cells_y = max(int(target_dim_y / grid_cell_size), 1)
+        
+        # Ensure enough grid cells to match desired density
+        target_grid_cells = int(target_area * self.placement_density)
+        if grid_cells_x * grid_cells_y < target_grid_cells:
+            # Scale up grid if needed while maintaining aspect ratio
+            scale_factor = math.sqrt(target_grid_cells / (grid_cells_x * grid_cells_y))
+            grid_cells_x = max(int(grid_cells_x * scale_factor), 1)
+            grid_cells_y = max(int(grid_cells_y * scale_factor), 1)
         
         self.report({'INFO'}, f"Target dimensions: {target_dim_x:.2f}m x {target_dim_y:.2f}m, Area: {target_area:.2f}m²")
-        self.report({'INFO'}, f"Using grid size {grid_size}x{grid_size} to place ~{int(target_area * self.placement_density)} images")
+        self.report({'INFO'}, f"Grid size: {grid_cells_x}x{grid_cells_y} cells ({grid_cell_size:.4f}m per cell)")
         
         # Get target object world matrix and bounds
         world_matrix = target_obj.matrix_world
@@ -484,12 +613,12 @@ class PlaceImages(Operator):
         # Create points directly on the target object
         points = []
         
-        # Use simple grid placement on object surface
-        for i in range(grid_size):
-            for j in range(grid_size):
+        # Use grid placement on object surface with snapping
+        for i in range(grid_cells_x):
+            for j in range(grid_cells_y):
                 # Calculate position in object's local space
-                u = i / (grid_size - 1)  # 0 to 1
-                v = j / (grid_size - 1)  # 0 to 1
+                u = i / max(grid_cells_x - 1, 1)  # 0 to 1
+                v = j / max(grid_cells_y - 1, 1)  # 0 to 1
                 
                 # Get local coordinates
                 local_x = local_min[0] + u * (local_max[0] - local_min[0])
@@ -512,15 +641,27 @@ class PlaceImages(Operator):
                 # Convert to world space
                 world_pos = world_matrix @ mathutils.Vector((local_x, local_y, local_z))
                 
-                # Add small random offset for natural look
-                offset_scale = min(target_dim_x, target_dim_y) / grid_size / 2
-                offset_x = random.uniform(-offset_scale, offset_scale)
-                offset_y = random.uniform(-offset_scale, offset_scale)  # Fixed: was using offset_y
+                # Snap to grid based on pixels_per_meter
+                snapped_x = round(world_pos.x / grid_cell_size) * grid_cell_size
+                snapped_y = round(world_pos.y / grid_cell_size) * grid_cell_size
+                snapped_z = world_pos.z  # Don't snap Z to keep on surface
+                
+                # Add small randomization within the grid cell if desired
+                randomize_within_cell = False  # Set to True to allow random placement within grid cells
+                
+                if randomize_within_cell:
+                    # Add small random offset within the grid cell for natural look
+                    rand_factor = grid_cell_size * 0.5  # Only randomize up to half the cell size
+                    offset_x = random.uniform(-rand_factor, rand_factor)
+                    offset_y = random.uniform(-rand_factor, rand_factor)
+                else:
+                    offset_x = 0
+                    offset_y = 0
                 
                 points.append((
-                    world_pos.x + offset_x,
-                    world_pos.y + offset_y,
-                    world_pos.z
+                    snapped_x + offset_x,
+                    snapped_y + offset_y,
+                    snapped_z
                 ))
         
         # Now limit to the actual desired density if we found more points than needed
@@ -663,8 +804,6 @@ class PlaceImages(Operator):
         
         self.report({'INFO'}, f"Cleared previous generated objects for {generator.name}")
     
-    # Corrected material handling for instancing:
-
     def create_instance_at_point(self, context, prototype, location):
         """Create an instance of the prototype at the specified location"""
         if not prototype:
@@ -697,8 +836,8 @@ class PlaceImages(Operator):
         return instance
     
     def create_image_prototype(self, context, img, padding=0.0, 
-                             pixels_per_meter=32.0, rotation_angle=45.0, 
-                             rotation_axis='X', stretch_axis='Y'):
+                        pixels_per_meter=32.0, rotation_angle=45.0, 
+                        rotation_axis='X', stretch_axis='Y'):
         """Create a prototype object that will be instanced - following the correct order:
         spawn -> crop -> rotate/scale -> origin"""
         
@@ -723,6 +862,10 @@ class PlaceImages(Operator):
         texture_node.image = img
         texture_node.location = (-300, 300)
         
+        # Set interpolation to Closest (no interpolation) if available on the node
+        if hasattr(texture_node, 'interpolation'):
+            texture_node.interpolation = 'Closest'
+        
         # Add principled BSDF node
         bsdf_node = nodes.new('ShaderNodeBsdfPrincipled')
         bsdf_node.location = (0, 300)
@@ -744,7 +887,13 @@ class PlaceImages(Operator):
         plane.data.materials.append(mat)
         
         # 2. CROP: Crop to alpha bounds
-        self.crop_plane_to_alpha(context, plane, padding)
+        # Select only this plane
+        bpy.ops.object.select_all(action='DESELECT')
+        plane.select_set(True)
+        context.view_layer.objects.active = plane
+        
+        # Call the operator directly with padding parameter
+        bpy.ops.object.crop_planes_to_alpha(padding=padding)
         
         # 3. ROTATE AND SCALE:
         # Scale based on pixels per meter
@@ -785,145 +934,7 @@ class PlaceImages(Operator):
             bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
         
         return plane
-    
-    def crop_plane_to_alpha(self, context, plane, padding=0.0):
-        """Crop a plane to its image's alpha bounds"""
-        
-        # Get the image from the plane's material
-        if not plane.data.materials or not plane.data.materials[0] or not plane.data.materials[0].node_tree:
-            return
-            
-        material = plane.data.materials[0]
-        nodes = material.node_tree.nodes
-        image_node = nodes.get('Image Texture')
-        
-        if not image_node or not image_node.image:
-            return
-            
-        image = image_node.image
-        mesh = plane.data
-            
-        # Get image bounds
-        bounds = self.get_image_bounds(image)
-        if not bounds:
-            return
-            
-        # Apply padding
-        padding_factor = padding / 100
-        bounds['min_u'] = max(0.0, bounds['min_u'] - padding_factor)
-        bounds['max_u'] = min(1.0, bounds['max_u'] + padding_factor)
-        bounds['min_v'] = max(0.0, bounds['min_v'] - padding_factor)
-        bounds['max_v'] = min(1.0, bounds['max_v'] + padding_factor)
-        
-        # Store original vertex positions and get bounds
-        original_verts = [(vert.co.copy()) for vert in mesh.vertices]
-        x_coords = [v.co.x for v in mesh.vertices]
-        y_coords = [v.co.y for v in mesh.vertices]
-        min_x, max_x = min(x_coords), max(x_coords)
-        min_y, max_y = min(y_coords), max(y_coords)
-        
-        # Calculate UV dimensions
-        uv_width = bounds['max_u'] - bounds['min_u']
-        uv_height = bounds['max_v'] - bounds['min_v']
-        uv_center_x = (bounds['min_u'] + bounds['max_u']) / 2
-        uv_center_y = (bounds['min_v'] + bounds['max_v']) / 2
-        
-        # Calculate scale factors
-        original_width = max_x - min_x
-        original_height = max_y - min_y
-        
-        # Calculate the offset from UV space to vertex space
-        offset_x = (uv_center_x - 0.5) * original_width
-        offset_y = (uv_center_y - 0.5) * original_height
-        
-        # Update UV coordinates
-        uv_layer = mesh.uv_layers.active
-        
-        # Create vertex to UV mapping
-        vert_to_uv = {}
-        for face in mesh.polygons:
-            for vert_idx, loop_idx in zip(face.vertices, face.loop_indices):
-                if vert_idx not in vert_to_uv:
-                    vert_to_uv[vert_idx] = loop_idx
-        
-        # Update UVs using vertex mapping
-        for vert_idx, loop_idx in vert_to_uv.items():
-            vert = mesh.vertices[vert_idx]
-            # Calculate relative position in mesh
-            rel_x = (vert.co.x - min_x) / (max_x - min_x)
-            rel_y = (vert.co.y - min_y) / (max_y - min_y)
-            
-            # Map to new UV coordinates
-            uv_layer.data[loop_idx].uv.x = bounds['min_u'] + (rel_x * uv_width)
-            uv_layer.data[loop_idx].uv.y = bounds['min_v'] + (rel_y * uv_height)
-        
-        # Update vertices while maintaining position and scale
-        for vert_idx, vertex in enumerate(mesh.vertices):
-            original_vert = original_verts[vert_idx]
-            vertex.co.x = original_vert.x * uv_width + offset_x
-            vertex.co.y = original_vert.y * uv_height + offset_y
-            vertex.co.z = original_vert.z
-        
-        mesh.update()
-        
-        # Set origin to bottom center
-        original_location = plane.location.copy()
-        
-        # Calculate bounds in local space after cropping
-        x_coords = [v.co.x for v in mesh.vertices]
-        y_coords = [v.co.y for v in mesh.vertices]
-        z_coords = [v.co.z for v in mesh.vertices]
-        min_x, max_x = min(x_coords), max(x_coords)
-        min_y, max_y = min(y_coords), max(y_coords)
-        min_z, max_z = min(z_coords), max(z_coords)
-        center_x = (min_x + max_x) / 2
-        center_y = (min_y + max_y) / 2
-        
-        # Set origin to bottom center
-        orig_cursor_loc = context.scene.cursor.location.copy()
-        
-        # Position cursor at desired origin in object's local space
-        context.scene.cursor.location = plane.matrix_world @ mathutils.Vector((center_x, min_y, 0))
-        
-        # Set origin to cursor
-        bpy.ops.object.origin_set(type='ORIGIN_CURSOR')
-        
-        # Restore cursor
-        context.scene.cursor.location = orig_cursor_loc
-    
-    def get_image_bounds(self, image):
-        """Calculate the bounds of an image based on alpha channel"""
-        
-        if not image or not image.pixels:
-            return None
-            
-        # Convert image pixels to numpy array
-        width = image.size[0]
-        height = image.size[1]
-        pixels = np.array(image.pixels[:]).reshape(height, width, 4)
-        
-        # Get alpha channel
-        alpha = pixels[:, :, 3]
-        
-        # Find rows and columns with non-zero alpha
-        rows = np.any(alpha > 0, axis=1)
-        cols = np.any(alpha > 0, axis=0)
-        
-        if not np.any(rows) or not np.any(cols):
-            return None
-            
-        # Get bounds
-        min_row, max_row = np.where(rows)[0][[0, -1]]
-        min_col, max_col = np.where(cols)[0][[0, -1]]
-        
-        # Convert to UV coordinates
-        return {
-            'min_u': min_col / width,
-            'max_u': (max_col + 1) / width,
-            'min_v': min_row / height,
-            'max_v': (max_row + 1) / height
-        }
-            
+                    
 #Crop selected planes to their alpha bounds
 class CropImages(Operator):
 
@@ -1390,130 +1401,6 @@ class RenderPlaneToolsPanel(Panel):
         box.prop(context.scene, "num_steps", text="Number of steps")
         box.operator("object.create_stairs")
         
-class ToggleMask(Operator):
-    bl_idname = "object.toggle_mask"
-    bl_label = "Toggle Mask"
-    bl_options = {'REGISTER', 'UNDO'}
-    
-    index: IntProperty(
-        name="Index",
-        description="Index of the generator to toggle mask for",
-        default=0,
-        min=0
-    )
-    
-    def execute(self, context):
-        if self.index >= len(context.scene.generators):
-            self.report({'ERROR'}, "Invalid generator index")
-            return {'CANCELLED'}
-            
-        generator = context.scene.generators[self.index]
-        
-        # Check if target and mask exist
-        if not generator.target_object:
-            self.report({'ERROR'}, "No target object selected")
-            return {'CANCELLED'}
-            
-        if not generator.mask_texture or generator.mask_texture not in bpy.data.images:
-            self.report({'ERROR'}, "Mask texture not found. Create a mask first.")
-            return {'CANCELLED'}
-            
-        target_obj = generator.target_object
-        mask_img = bpy.data.images[generator.mask_texture]
-        
-        # Toggle the visibility
-        current_state = context.scene.show_mask
-        context.scene.show_mask = not current_state
-        
-        # Get material
-        if not target_obj.data.materials or len(target_obj.data.materials) == 0:
-            self.report({'ERROR'}, "Target object has no materials")
-            return {'CANCELLED'}
-            
-        mat = target_obj.data.materials[0]
-        if not mat.use_nodes:
-            self.report({'ERROR'}, "Material does not use nodes")
-            return {'CANCELLED'}
-            
-        nodes = mat.node_tree.nodes
-        links = mat.node_tree.links
-        
-        # Find the mask node
-        mask_node = None
-        for node in nodes:
-            if node.type == 'TEX_IMAGE' and node.name == 'Mask Texture':
-                mask_node = node
-                break
-                
-        # If mask node not found, we can't toggle it
-        if not mask_node:
-            self.report({'ERROR'}, "Mask texture node not found in material")
-            return {'CANCELLED'}
-            
-        # Find a Principled BSDF or similar node
-        shader_node = None
-        for node in nodes:
-            if node.type == 'BSDF_PRINCIPLED':
-                shader_node = node
-                break
-            elif node.type in ['BSDF_DIFFUSE', 'BSDF_GLOSSY']:
-                shader_node = node
-                break
-                
-        if not shader_node:
-            self.report({'ERROR'}, "No shader node found in material")
-            return {'CANCELLED'}
-            
-        # Find output node
-        output_node = None
-        for node in nodes:
-            if node.type == 'OUTPUT_MATERIAL':
-                output_node = node
-                break
-                
-        if not output_node:
-            self.report({'ERROR'}, "No output node found in material")
-            return {'CANCELLED'}
-        
-        # Toggle connections based on new state
-        if not context.scene.show_mask:
-            # Hide mask - disconnect from Base Color
-            for link in list(links):
-                if (link.from_node == mask_node and 
-                    link.to_node == shader_node and
-                    link.to_socket.name == 'Base Color'):
-                    links.remove(link)
-            
-            # Check if there's a stored original Base Color node
-            original_color_node = None
-            for node in nodes:
-                if node.name == 'Original Color':
-                    original_color_node = node
-                    break
-                
-            # If found, reconnect it
-            if original_color_node:
-                links.new(original_color_node.outputs[0], shader_node.inputs['Base Color'])
-            
-            self.report({'INFO'}, "Mask hidden")
-        else:
-            # Show mask - first save current Base Color connection
-            color_input = shader_node.inputs['Base Color']
-            if color_input.is_linked:
-                color_link = color_input.links[0]
-                color_source = color_link.from_node
-                
-                # Rename to identify it
-                color_source.name = 'Original Color'
-                
-                # Disconnect it
-                links.remove(color_link)
-            
-            # Connect mask to Base Color
-            links.new(mask_node.outputs['Color'], shader_node.inputs['Base Color'])
-            self.report({'INFO'}, "Mask shown")
-        
-        return {'FINISHED'}
 
 #Adds custom properties to Blender's Scene type and registers classes
 def register():
@@ -1583,9 +1470,7 @@ def register():
     bpy.types.Scene.placement_density = FloatProperty(
         name="Density",
         description="Density of image placement (images per square meter)",
-        default=5.0,  # Increased default
-        min=0.1,
-        max=50.0      # Increased maximum
+        default=0.05,  # Increased default
     )
     
     # Use mask for placement
