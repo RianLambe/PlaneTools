@@ -997,7 +997,13 @@ class CropImages(Operator):
             'min_u': MinCol / Width,
             'max_u': (MaxCol + 1) / Width,
             'min_v': MinRow / Height,
-            'max_v': (MaxRow + 1) / Height
+            'max_v': (MaxRow + 1) / Height,
+            'min_col': MinCol,
+            'max_col': MaxCol,
+            'min_row': MinRow,
+            'max_row': MaxRow,
+            'width': Width,
+            'height': Height
         }
 
     def execute(self, context):
@@ -1027,8 +1033,11 @@ class CropImages(Operator):
             if not image_node or not image_node.image:
                 continue
             
+            # Get the original image
+            original_image = image_node.image
+            
             #Get image bounds
-            Bounds = CropImages.GetImageBounds(image_node.image)
+            Bounds = CropImages.GetImageBounds(original_image)
             if not Bounds:
                 continue
 
@@ -1046,36 +1055,72 @@ class CropImages(Operator):
                 abs(CurrentUVBounds['min_v'] - Bounds['min_v']) < Margin and
                 abs(CurrentUVBounds['max_v'] - Bounds['max_v']) < Margin):
                 continue
-
-            #Apply padding
+                
+            # Create a new cropped image
+            # First apply padding to pixel bounds
             Padding = self.padding / 100
-            Bounds['min_u'] = max(0.0, Bounds['min_u'] - Padding)
-            Bounds['max_u'] = min(1.0, Bounds['max_u'] + Padding)
-            Bounds['min_v'] = max(0.0, Bounds['min_v'] - Padding)
-            Bounds['max_v'] = min(1.0, Bounds['max_v'] + Padding)
+            padding_width_pixels = int(Padding * Bounds['width'])
+            padding_height_pixels = int(Padding * Bounds['height'])
             
-            # Store original vertex positions and get bounds
-            original_verts = [(vert.co.copy()) for vert in mesh.vertices]
-            x_coords = [v.co.x for v in mesh.vertices]
-            y_coords = [v.co.y for v in mesh.vertices]
-            min_x, max_x = min(x_coords), max(x_coords)
-            min_y, max_y = min(y_coords), max(y_coords)
+            min_col = max(0, Bounds['min_col'] - padding_width_pixels)
+            max_col = min(Bounds['width'] - 1, Bounds['max_col'] + padding_width_pixels)
+            min_row = max(0, Bounds['min_row'] - padding_height_pixels)
+            max_row = min(Bounds['height'] - 1, Bounds['max_row'] + padding_height_pixels)
             
-            # Calculate UV dimensions
-            uv_width = Bounds['max_u'] - Bounds['min_u']
-            uv_height = Bounds['max_v'] - Bounds['min_v']
-            uv_center_x = (Bounds['min_u'] + Bounds['max_u']) / 2
-            uv_center_y = (Bounds['min_v'] + Bounds['max_v']) / 2
+            # Calculate new dimensions
+            new_width = max_col - min_col + 1
+            new_height = max_row - min_row + 1
             
-            # Calculate scale factors
-            original_width = max_x - min_x
-            original_height = max_y - min_y
+            # Create a new image for the cropped version
+            cropped_name = f"{original_image.name}_cropped"
+            if cropped_name in bpy.data.images:
+                # If an image with this name already exists, use a unique name
+                i = 1
+                while f"{cropped_name}_{i}" in bpy.data.images:
+                    i += 1
+                cropped_name = f"{cropped_name}_{i}"
+                
+            cropped_image = bpy.data.images.new(
+                name=cropped_name,
+                width=new_width,
+                height=new_height,
+                alpha=True
+            )
             
-            # Calculate the offset from UV space to vertex space
-            offset_x = (uv_center_x - 0.5) * original_width
-            offset_y = (uv_center_y - 0.5) * original_height
+            # Extract the relevant portion of the original image
+            original_pixels = np.array(original_image.pixels[:])
+            original_pixels = original_pixels.reshape(Bounds['height'], Bounds['width'], 4)
             
-            # Update UV coordinates
+            # Extract the cropped region
+            cropped_pixels = original_pixels[min_row:max_row+1, min_col:max_col+1, :]
+            
+            # Flatten for Blender's pixels
+            cropped_pixels_flat = cropped_pixels.flatten()
+            
+            # Assign to new image - Blender expects a flat sequence, not a numpy array
+            cropped_image.pixels[:] = cropped_pixels_flat
+            
+            # Ensure cropped image is packed if original was packed
+            if original_image.packed_file:
+                cropped_image.pack()
+            
+            # Set the modified image to the image node
+            image_node.image = cropped_image
+            
+            # Preserve the interpolation mode when changing the image
+            # (interpolation is a property of the node, not the image)
+            if hasattr(image_node, 'interpolation'):
+                # Store the current interpolation mode
+                current_interpolation = image_node.interpolation
+                # Set the image first
+                image_node.image = cropped_image
+                # Then restore the interpolation mode
+                image_node.interpolation = current_interpolation
+            else:
+                # If no interpolation property exists, just set the image
+                image_node.image = cropped_image
+            
+            # Update UVs to match the new image bounds (now full 0-1 range)
             uv_layer = mesh.uv_layers.active
             
             # Create vertex to UV mapping
@@ -1085,23 +1130,48 @@ class CropImages(Operator):
                     if vert_idx not in vert_to_uv:
                         vert_to_uv[vert_idx] = loop_idx
             
-            # Update UVs using vertex mapping
+            # Update UVs to use the full 0-1 range for the new cropped image
             for vert_idx, loop_idx in vert_to_uv.items():
-                vert = mesh.vertices[vert_idx]
-                # Calculate relative position in mesh
-                rel_x = (vert.co.x - min_x) / (max_x - min_x)
-                rel_y = (vert.co.y - min_y) / (max_y - min_y)
+                uv = uv_layer.data[loop_idx].uv
+                # Convert from original UV space to new UV space
+                normalized_u = (uv.x - Bounds['min_u']) / (Bounds['max_u'] - Bounds['min_u'])
+                normalized_v = (uv.y - Bounds['min_v']) / (Bounds['max_v'] - Bounds['min_v'])
                 
-                # Map to new UV coordinates
-                uv_layer.data[loop_idx].uv.x = Bounds['min_u'] + (rel_x * uv_width)
-                uv_layer.data[loop_idx].uv.y = Bounds['min_v'] + (rel_y * uv_height)
+                # Ensure UVs stay within 0-1 range
+                uv.x = max(0.0, min(1.0, normalized_u))
+                uv.y = max(0.0, min(1.0, normalized_v))
             
-            # Update vertices while maintaining position and scale
+            # Store original vertex positions and get bounds
+            original_verts = [(vert.co.copy()) for vert in mesh.vertices]
+            x_coords = [v.co.x for v in mesh.vertices]
+            y_coords = [v.co.y for v in mesh.vertices]
+            min_x, max_x = min(x_coords), max(x_coords)
+            min_y, max_y = min(y_coords), max(y_coords)
+            
+            # Calculate scale factors
+            original_width = max_x - min_x
+            original_height = max_y - min_y
+            
+            # Get UV dimensions for original bounds
+            uv_width = Bounds['max_u'] - Bounds['min_u']
+            uv_height = Bounds['max_v'] - Bounds['min_v']
+            uv_center_x = (Bounds['min_u'] + Bounds['max_u']) / 2
+            uv_center_y = (Bounds['min_v'] + Bounds['max_v']) / 2
+            
+            # Calculate the offset from UV space to vertex space
+            offset_x = (uv_center_x - 0.5) * original_width
+            offset_y = (uv_center_y - 0.5) * original_height
+            
+            # Update vertices while maintaining position and scale (adjusted for the new UV space)
             for vert_idx, vertex in enumerate(mesh.vertices):
                 original_vert = original_verts[vert_idx]
                 vertex.co.x = original_vert.x * uv_width + offset_x
                 vertex.co.y = original_vert.y * uv_height + offset_y
                 vertex.co.z = original_vert.z
+            
+            # Add a custom property to track the cropped status
+            Obj["cropped_image"] = cropped_name
+            Obj["original_image"] = original_image.name
             
             mesh.update()
         
@@ -1175,13 +1245,14 @@ class RotateAndScale(Operator):
             obj.scale.y = value
         else:
             obj.scale.z = value
-def execute(self, context):
+            
+    def execute(self, context):
         angle_deg = context.scene.rotation_angle
         angle_rad = math.radians(angle_deg)
         rotation_axis = context.scene.rotation_axis
         stretch_axis = context.scene.stretch_axis
         
-        self.report({'INFO'}, f"Angle (deg): {angle_deg}, Cos({angle_deg}): {math.cos(math.radians(angle_deg))}")
+        self.report({'INFO'}, f"Angle (deg): {angle_deg}, Cos({angle_deg}): {math.cos(angle_rad)}")
         
         for obj in context.selected_objects:
             bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
@@ -1193,14 +1264,18 @@ def execute(self, context):
             elif rotation_axis == 'Z':
                 obj.rotation_euler.z = angle_rad
             
-            cos_angle = math.cos(math.radians(angle_deg))
-            scale_factor = 1 / cos_angle
+            cos_angle = math.cos(angle_rad)
+            if cos_angle == 0:
+                self.report({'WARNING'}, "Cosine is zero, cannot calculate scale factor")
+                scale_factor = 1.0
+            else:
+                scale_factor = 1 / cos_angle
             
             self.report({'INFO'}, f"Scale factor: {scale_factor}")
             
             self.set_scale(obj, stretch_axis, scale_factor)
             
-            obj.scale = obj.scale
+            # Apply the scale immediately
             bpy.context.view_layer.update()
             
         return {'FINISHED'}
